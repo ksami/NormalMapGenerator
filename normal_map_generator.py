@@ -2,13 +2,10 @@ import argparse
 import math
 import numpy as np
 from scipy import ndimage
-from matplotlib import pyplot
-from PIL import Image, ImageOps
+from PIL import Image
 import os
-import multiprocessing as mp
 
 def smooth_gaussian(im:np.ndarray, sigma) -> np.ndarray:
-
     if sigma == 0:
         return im
 
@@ -22,22 +19,7 @@ def smooth_gaussian(im:np.ndarray, sigma) -> np.ndarray:
 
     return im_smooth
 
-
-def gradient(im_smooth:np.ndarray):
-
-    gradient_x = im_smooth.astype(float)
-    gradient_y = im_smooth.astype(float)
-
-    kernel = np.arange(-1,2).astype(float)
-    kernel = - kernel / 2
-
-    gradient_x = ndimage.convolve(gradient_x, kernel[np.newaxis])
-    gradient_y = ndimage.convolve(gradient_y, kernel[np.newaxis].T)
-
-    return gradient_x,gradient_y
-
-
-def sobel(im_smooth):
+def sobel(im_smooth:np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     gradient_x = im_smooth.astype(float)
     gradient_y = im_smooth.astype(float)
 
@@ -49,8 +31,7 @@ def sobel(im_smooth):
     return gradient_x,gradient_y
 
 
-def compute_normal_map(gradient_x:np.ndarray, gradient_y:np.ndarray, intensity=1):
-
+def compute_normal_map(gradient_x:np.ndarray, gradient_y:np.ndarray, intensity:float=1.0) -> np.ndarray:
     width = gradient_x.shape[1]
     height = gradient_x.shape[0]
     max_x = np.max(gradient_x)
@@ -82,17 +63,15 @@ def compute_normal_map(gradient_x:np.ndarray, gradient_y:np.ndarray, intensity=1
 
     return normal_map
 
-def normalized(a) -> float: 
-    factor = 1.0/math.sqrt(np.sum(a*a)) # normalize
-    return a*factor
 
-def my_gauss(im:np.ndarray):
+def normalized(im:np.ndarray) -> np.ndarray:
+    factor = 1.0/math.sqrt(np.sum(im*im)) # normalize
+    return im*factor
+
+def my_gauss(im:np.ndarray) -> np.ndarray:
     return ndimage.uniform_filter(im.astype(float),size=20)
 
-def shadow(im:np.ndarray):
-    
-    shadowStrength = .5
-    
+def shadow(im:np.ndarray, strength:float=0.5) -> np.ndarray:
     im1 = im.astype(float)
     im0 = im1.copy()
     im00 = im1.copy()
@@ -113,62 +92,54 @@ def shadow(im:np.ndarray):
     im1=normalized(im1)
     im00=normalized(im00)
 
-    shadow=im00*2.0+im000-im1*2.0-im0 
+    shadow=im00*2.0+im000-im1*2.0-im0
     shadow=normalized(shadow)
     mean = np.mean(shadow)
-    rmse = np.sqrt(np.mean((shadow-mean)**2))*(1/shadowStrength)
+    rmse = np.sqrt(np.mean((shadow-mean)**2))*(1/strength)
     shadow = np.clip(shadow, mean-rmse*2.0,mean+rmse*0.5)
 
     return shadow
 
-def flipgreen(path:str):
-    try:
-        with Image.open(path) as img:
-            red, green, blue, alpha= img.split()
-            image = Image.merge("RGB",(red,ImageOps.invert(green),blue))
-            image.save(path)
-    except ValueError:
-        with Image.open(path) as img:
-            red, green, blue = img.split()
-            image = Image.merge("RGB",(red,ImageOps.invert(green),blue))
-            image.save(path)
-
-def CleanupAO(path:str):
+def flip_green(im:np.ndarray) -> None:
     '''
-    Remove unnsesary channels.
+    Invert green channel
     '''
-    try:
-        with Image.open(path) as img:
-            red, green, blue, alpha= img.split()
-            NewG = ImageOps.colorize(green,black=(100, 100, 100),white=(255,255,255),blackpoint=0,whitepoint=180)
-            NewG.save(path)
-    except ValueError:
-        with Image.open(path) as img:
-            red, green, blue = img.split()
-            NewG = ImageOps.colorize(green,black=(100, 100, 100),white=(255,255,255),blackpoint=0,whitepoint=180)
-            NewG.save(path)
+    im[..., 1] = 1.0 - im[..., 1]
 
-def adjustPath(Org_Path:str,addto:str):
+def colorize_ao(im:np.ndarray) -> np.ndarray:
     '''
-    Adjust the given path to correctly save the new file.
+    Map shadow values to greyscale colors
     '''
+    blackpoint = 0
+    rgb_black = 100
+    whitepoint = 180
+    rgb_white = 255
 
-    path = Org_Path.split("\\")
-    file = path[-1]
-    filename = file.split(".")[0]
-    fileext = file.split(".")[-1]
+    # Convert range to 0-255 uint8
+    int_im = np.interp(im, [np.min(im), np.max(im)], [0, 255]).astype(np.uint8)
 
-    newfilename = addto+"\\"+filename + "_" + addto + "." + fileext
-    path.pop(-1)
-    path.append(newfilename)
+    # Values < blackpoint to rgb_black, > whitepoint to rgb_white, anything in between linearly interpolated
+    colorized = np.interp(int_im, [blackpoint, whitepoint], [rgb_black, rgb_white])
 
-    newpath = '\\'.join(path)
+    return np.stack([colorized, colorized, colorized], axis=-1).astype(np.uint8)
 
-    return newpath
 
-def Convert(input_file,smoothness,intensity):
+def adjust_path(original_path:str, map_type:str) -> str:
+    '''
+    Path to save the maps alongside the original file eg.
+    .
+    |- image.png
+    |- image_Normal.png
+    |- image_AO.png
+    '''
+    root, ext = os.path.splitext(original_path)
+    new_path = f"{root}_{map_type}{ext}"
+    print(f"Saving to {new_path}")
+    return new_path
 
-    im = pyplot.imread(input_file)
+def convert(input_file:str, smoothness:float, intensity:float, shadow_strength:float):
+    with Image.open(input_file) as f:
+        im = np.asarray(f)
 
     if im.ndim == 3:
         im_grey = np.zeros((im.shape[0],im.shape[1])).astype(float)
@@ -180,45 +151,33 @@ def Convert(input_file,smoothness,intensity):
     sobel_x, sobel_y = sobel(im_smooth)
 
     normal_map = compute_normal_map(sobel_x, sobel_y, intensity)
+    flip_green(normal_map)
 
-    pyplot.imsave(adjustPath(input_file,"Normal"),normal_map)
+    Image.fromarray((normal_map * 255).astype(np.uint8), mode="RGB").save(adjust_path(input_file,"Normal"))
 
-    flipgreen(adjustPath(input_file,"Normal"))
+    im_shadow = shadow(im, shadow_strength)
+    im_shadow = colorize_ao(im_shadow)
 
-    im_shadow = shadow(im)
+    Image.fromarray(im_shadow, mode="RGB").save(adjust_path(input_file,"AO"))
 
-    pyplot.imsave(adjustPath(input_file,"AO"),im_shadow)
-    CleanupAO(adjustPath(input_file,"AO"))
 
-def startConvert():
-    
-    parser = argparse.ArgumentParser(description='Compute normal map of an image')
+def main():
+    parser = argparse.ArgumentParser(description='Compute normal and ambient occlusion map of an image')
 
-    parser.add_argument('input_file', type=str, help='input folder path')
+    parser.add_argument('input_file', type=str, help='input file path')
     parser.add_argument('-s', '--smooth', default=0., type=float, help='smooth gaussian blur applied on the image')
     parser.add_argument('-it', '--intensity', default=1., type=float, help='intensity of the normal map')
+    parser.add_argument('-ao', '--aostrength', default=0.5, type=float, help='strength of the AO map')
 
     args = parser.parse_args()
 
+    input_file = args.input_file
     sigma = args.smooth
     intensity = args.intensity
-    input_file = args.input_file
-    
-    for i in ["Ao","Normal"]:
-        final_path = os.path.join(input_file,i)
-        if not os.path.isdir(final_path):
-            os.makedirs (final_path)
-    
-    for root, _, files in os.walk(input_file, topdown=False):
-       for name in files:
-          input_file.append(str(os.path.join(root, name).replace("/","\\")))
-    
-    if type(input_file) == str:
-        Convert(input_file,sigma,intensity)
-    elif type(input_file) == list:
-        for i in input_file:
-            ctx = mp.get_context('spawn')
-            q = ctx.Queue()
-            p = ctx.Process(target=Convert,args=(input_file,sigma,intensity))
-            p.start()
-        p.join()
+    shadow_strength = args.aostrength
+
+    convert(input_file, sigma, intensity, shadow_strength)
+
+
+if __name__ == "__main__":
+    main()
